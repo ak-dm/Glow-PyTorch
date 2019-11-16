@@ -73,7 +73,8 @@ def get_SVHN(augment, dataroot, download):
     transformations.extend([transforms.ToTensor(), preprocess])
     transform = transforms.Compose(transformations)
 
-    one_hot_encode = get_one_hot_encode(num_classes)
+    #one_hot_encode = get_one_hot_encode(num_classes)
+    one_hot_encode = None
 
     path = Path(dataroot) / 'data' / 'SVHN'
     train_dataset = datasets.SVHN(path, split='train',

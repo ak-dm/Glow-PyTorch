@@ -60,8 +60,7 @@ class VAE(nn.Module):
         x_var = torch.exp(x_logvar)
         
         loss_DKL = - 0.5 * (1 + z_logvar - z_mu**2 - z_var).sum(dim=1)
-        loss_rec = 0.5 * (c * h * w) * torch.log(2 * math.pi * x_var.view(b,-1).sum(dim=1)) 
-                + 0.5 * ((x - x_mu) ** 2 / x_var).view(b, -1).sum(dim=1)
+        loss_rec = 0.5 * (c * h * w) * torch.log(2 * math.pi * x_var.view(b,-1).sum(dim=1)) + 0.5 * ((x - x_mu) ** 2 / x_var).view(b, -1).sum(dim=1)
         objective = -(loss_rec + loss_DKL)
         bpd = (-objective) / (math.log(2.) * c * h * w)
         
