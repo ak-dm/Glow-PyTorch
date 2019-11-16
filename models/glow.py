@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 
-from modules import (Conv2d, Conv2dZeros, ActNorm2d, InvertibleConv1x1,
+from models.modules import (Conv2d, Conv2dZeros, ActNorm2d, InvertibleConv1x1,
                      Permute2d, LinearZeros, SqueezeLayer,
                      Split2d, gaussian_likelihood, gaussian_sample)
 from utils import split_feature, uniform_binning_correction
@@ -243,7 +243,7 @@ class Glow(nn.Module):
         # Full objective - converted to bits per dimension
         bpd = (-objective) / (math.log(2.) * c * h * w)
 
-        return z, bpd, y_logits
+        return z, bpd, y_logits, x[:16]
 
     def reverse_flow(self, z, y_onehot, temperature):
         with torch.no_grad():

@@ -12,12 +12,14 @@ import torch.optim as optim
 import torch.utils.data as data
 
 from ignite.contrib.handlers import ProgressBar
+from ignite.contrib.handlers.custom_events import CustomPeriodicEvent
 from ignite.engine import Engine, Events
 from ignite.handlers import ModelCheckpoint, Timer
 from ignite.metrics import RunningAverage, Loss
 
-from datasets import get_CIFAR10, get_SVHN
+from datasets import get_CIFAR10, get_SVHN, postprocess
 from models.glow import Glow
+from models.vae import VAE
 
 try:
     import visdom
@@ -77,8 +79,11 @@ def compute_loss_y(nll, y_logits, y_weight, y, multi_class, reduction="mean"):
     return losses
 
 
-def create_plot_window(vis, xlabel, ylabel, title):
-    return vis.line(X=np.array([1]), Y=np.array([np.nan]), opts=dict(xlabel=xlabel, ylabel=ylabel, title=title))
+def create_plot_window(vis, env, xlabel, ylabel, title):
+    return vis.line(X=np.array([1]), Y=np.array([np.nan]), opts=dict(xlabel=xlabel, ylabel=ylabel, title=title), env=env)
+
+def create_image_window(vis, env, title):
+    return vis.image(torch.zeros(3,64,512), env=env)
 
 def main(
     model_name,
@@ -113,6 +118,7 @@ def main(
 ):
     
     vis = visdom.Visdom()
+    env = "{}_{}".format(model_name,dataset)
     
     device = "cpu" if (not torch.cuda.is_available() or not cuda) else "cuda:0"
 
@@ -139,7 +145,7 @@ def main(
         drop_last=False,
     )
     
-    if model_name is "Glow":
+    if model_name == "Glow":
         model = Glow(
             image_shape,
             hidden_channels,
@@ -153,6 +159,11 @@ def main(
             learn_top,
             y_condition,
         )
+    elif model_name == "VAE":
+        model = VAE(
+            image_shape,
+            hidden_channels,
+        )
 
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=5e-5)
@@ -160,8 +171,9 @@ def main(
     lr_lambda = lambda epoch: min(1.0, (epoch + 1) / warmup)  # noqa
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     
-    train_loss_window = create_plot_window(vis, '#Iterations', 'Loss', 'Training Loss')
-    val_avg_loss_window = create_plot_window(vis, '#Epochs', 'Loss', 'Validation Average Loss')
+    train_loss_window = create_plot_window(vis, env, '#Iterations', 'Loss', 'Training Loss')
+    val_avg_loss_window = create_plot_window(vis, env, '#Epochs', 'Loss', 'Validation Average Loss')
+    train_image_window = create_image_window(vis, env, 'Training Images')
     
     def step(engine, batch):
         model.train()
@@ -175,10 +187,13 @@ def main(
             z, nll, y_logits = model(x, y)
             losses = compute_loss_y(nll, y_logits, y_weight, y, multi_class)
         else:
-            z, nll, y_logits = model(x, None)
+            z, nll, y_logits, im = model(x)
             losses = compute_loss(nll)
-        vis.line(X=np.array([engine.state.iteration]), Y=np.array([losses["total_loss"].item()]),
-                 win=train_loss_window, update='append')
+        if engine.state.iteration % 250 == 1:
+            vis.line(X=np.array([engine.state.iteration]), Y=np.array([losses["total_loss"].item()]),
+                 win=train_loss_window, update='append', env=env)
+            vis.images(postprocess(im), nrow=16, win=train_image_window, env=env)
+        
         losses["total_loss"].backward()
 
         if max_grad_clip > 0:
@@ -204,7 +219,7 @@ def main(
                     nll, y_logits, y_weight, y, multi_class, reduction="none"
                 )
             else:
-                z, nll, y_logits = model(x, None)
+                z, nll, y_logits, im = model(x)
                 losses = compute_loss(nll, reduction="none")
 
         return losses
@@ -213,7 +228,7 @@ def main(
     checkpoint_handler = ModelCheckpoint(
         output_dir, model_name, save_interval=1, n_saved=5, require_empty=False
     )
-
+    
     trainer.add_event_handler(
         Events.EPOCH_COMPLETED,
         checkpoint_handler,
@@ -283,10 +298,10 @@ def main(
 
             if y_condition:
                 init_targets = torch.cat(init_targets).to(device)
+                model(init_batches, init_targets)
             else:
                 init_targets = None
-
-            model(init_batches, init_targets)
+                model(init_batches)
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def evaluate(engine):
@@ -297,7 +312,7 @@ def main(
 
         losses = ", ".join([f"{key}: {value:.2f}" for key, value in metrics.items()])
         vis.line(X=np.array([engine.state.epoch]), Y=np.array([metrics["total_loss"]]),
-                 win=val_avg_loss_window, update='append')
+                 win=val_avg_loss_window, update='append', env=env)
         print(f"Validation Results - Epoch: {engine.state.epoch} {losses}")
 
     timer = Timer(average=True)
@@ -326,7 +341,7 @@ if __name__ == "__main__":
         "--model_name",
         type=str,
         default="Glow",
-        choices=["Glow",],
+        choices=["Glow","VAE",],
         help="Type of the model to be used.",
     )
     

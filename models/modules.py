@@ -369,3 +369,11 @@ class InvertibleConv1x1(nn.Module):
             if logdet is not None:
                 logdet = logdet - dlogdet
             return z, logdet
+
+class View(nn.Module):
+    def __init__(self, shape):
+        super(View, self).__init__()
+        self.shape = shape
+
+    def forward(self, x):
+        return x.view(*self.shape)
