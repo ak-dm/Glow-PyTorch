@@ -4,6 +4,7 @@ import json
 import shutil
 import random
 from itertools import islice
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -16,7 +17,12 @@ from ignite.handlers import ModelCheckpoint, Timer
 from ignite.metrics import RunningAverage, Loss
 
 from datasets import get_CIFAR10, get_SVHN
-from model import Glow
+from models.glow import Glow
+
+try:
+    import visdom
+except ImportError:
+    raise RuntimeError("No visdom package is found. Please install it with command: \n pip install visdom")
 
 
 def check_manual_seed(seed):
@@ -71,7 +77,11 @@ def compute_loss_y(nll, y_logits, y_weight, y, multi_class, reduction="mean"):
     return losses
 
 
+def create_plot_window(vis, xlabel, ylabel, title):
+    return vis.line(X=np.array([1]), Y=np.array([np.nan]), opts=dict(xlabel=xlabel, ylabel=ylabel, title=title))
+
 def main(
+    model_name,
     dataset,
     dataroot,
     download,
@@ -101,7 +111,9 @@ def main(
     saved_optimizer,
     warmup,
 ):
-
+    
+    vis = visdom.Visdom()
+    
     device = "cpu" if (not torch.cuda.is_available() or not cuda) else "cuda:0"
 
     check_manual_seed(seed)
@@ -126,27 +138,31 @@ def main(
         num_workers=n_workers,
         drop_last=False,
     )
-
-    model = Glow(
-        image_shape,
-        hidden_channels,
-        K,
-        L,
-        actnorm_scale,
-        flow_permutation,
-        flow_coupling,
-        LU_decomposed,
-        num_classes,
-        learn_top,
-        y_condition,
-    )
+    
+    if model_name is "Glow":
+        model = Glow(
+            image_shape,
+            hidden_channels,
+            K,
+            L,
+            actnorm_scale,
+            flow_permutation,
+            flow_coupling,
+            LU_decomposed,
+            num_classes,
+            learn_top,
+            y_condition,
+        )
 
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=5e-5)
 
     lr_lambda = lambda epoch: min(1.0, (epoch + 1) / warmup)  # noqa
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-
+    
+    train_loss_window = create_plot_window(vis, '#Iterations', 'Loss', 'Training Loss')
+    val_avg_loss_window = create_plot_window(vis, '#Epochs', 'Loss', 'Validation Average Loss')
+    
     def step(engine, batch):
         model.train()
         optimizer.zero_grad()
@@ -161,7 +177,8 @@ def main(
         else:
             z, nll, y_logits = model(x, None)
             losses = compute_loss(nll)
-
+        vis.line(X=np.array([engine.state.iteration]), Y=np.array([losses["total_loss"].item()]),
+                 win=train_loss_window, update='append')
         losses["total_loss"].backward()
 
         if max_grad_clip > 0:
@@ -194,7 +211,7 @@ def main(
 
     trainer = Engine(step)
     checkpoint_handler = ModelCheckpoint(
-        output_dir, "glow", save_interval=1, n_saved=2, require_empty=False
+        output_dir, model_name, save_interval=1, n_saved=5, require_empty=False
     )
 
     trainer.add_event_handler(
@@ -279,7 +296,8 @@ def main(
         metrics = evaluator.state.metrics
 
         losses = ", ".join([f"{key}: {value:.2f}" for key, value in metrics.items()])
-
+        vis.line(X=np.array([engine.state.epoch]), Y=np.array([metrics["total_loss"]]),
+                 win=val_avg_loss_window, update='append')
         print(f"Validation Results - Epoch: {engine.state.epoch} {losses}")
 
     timer = Timer(average=True)
@@ -303,7 +321,15 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
+    
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="Glow",
+        choices=["Glow",],
+        help="Type of the model to be used.",
+    )
+    
     parser.add_argument(
         "--dataset",
         type=str,
@@ -324,7 +350,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--hidden_channels", type=int, default=512, help="Number of hidden channels"
+        "--hidden_channels", type=int, default=128, help="Number of hidden channels"
     )
 
     parser.add_argument("--K", type=int, default=32, help="Number of layers per block")
@@ -451,7 +477,10 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0, help="manual seed")
 
     args = parser.parse_args()
-
+    
+    args.output_dir = "outputs/{}_{}/".format(args.model_name,args.dataset)
+    print(args.output_dir)
+    
     try:
         os.makedirs(args.output_dir)
     except FileExistsError:
